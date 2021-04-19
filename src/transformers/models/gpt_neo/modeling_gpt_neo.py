@@ -237,7 +237,11 @@ class GPTNeoAttentionMixin:
         query = query.to(torch.float32)
         key = key.to(torch.float32)
 
-        attn_weights = torch.matmul(query, key.transpose(-1, -2))
+        try:
+            attn_weights = torch.matmul(query, key.transpose(-1, -2))
+        except Exception as ex:
+            print(query.shape, key.shape)
+            raise ex
         attn_weights = torch.where(causal_mask, attn_weights, masked_bias.to(attn_weights.dtype))
 
         if attention_mask is not None:
