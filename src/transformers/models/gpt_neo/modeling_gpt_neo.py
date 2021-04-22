@@ -418,6 +418,7 @@ class GPTNeoLocalSelfAttention(nn.Module, GPTNeoAttentionMixin):
 
         # compute block length and num_blocks
         batch_size, seq_length = hidden_states.shape[:2]
+        full_seq_length = seq_length + past_length
 
         padding = None
         if layer_past is None and full_seq_length % self.window_size != 0 and full_seq_length > self.window_size:
@@ -432,7 +433,6 @@ class GPTNeoLocalSelfAttention(nn.Module, GPTNeoAttentionMixin):
             seq_length += padding
             full_seq_length += padding
 
-        full_seq_length = seq_length + past_length
         block_length, num_blocks = self._get_block_length_and_num_blocks(full_seq_length, self.window_size)
 
         # create buckets
