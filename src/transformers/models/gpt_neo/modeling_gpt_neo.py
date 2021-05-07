@@ -722,9 +722,12 @@ class GPTNeoModel(GPTNeoPreTrainedModel):
         self.wte = nn.Embedding(config.vocab_size, self.embed_dim)
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
         self.drop = nn.Dropout(config.embed_dropout)
-        if 'google.colab' in str(get_ipython()):
-            to_gpu = lambda x: x.cuda()
-        else:
+        try:
+            if 'google.colab' in str(get_ipython()):
+                to_gpu = lambda x: x.cuda()
+            else:
+                to_gpu = lambda x: x
+        except:
             to_gpu = lambda x: x
         self.h = nn.ModuleList([to_gpu(GPTNeoBlock(config, layer_id=i).half()) for i in range(config.num_layers)])
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
@@ -913,9 +916,12 @@ class GPTNeoForCausalLM(GPTNeoPreTrainedModel):
 
     def __init__(self, config):
         super().__init__(config)
-        if 'google.colab' in str(get_ipython()):
-            to_gpu = lambda x: x.cuda()
-        else:
+        try:
+            if 'google.colab' in str(get_ipython()):
+                to_gpu = lambda x: x.cuda()
+            else:
+                to_gpu = lambda x: x
+        except:
             to_gpu = lambda x: x
         self.transformer = to_gpu(GPTNeoModel(config).half())
         self.lm_head = to_gpu(nn.Linear(config.hidden_size, config.vocab_size, bias=False).half())
