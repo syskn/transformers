@@ -1585,7 +1585,7 @@ class GenerationMixin:
             # sample
             probs = F.softmax(next_token_scores, dim=-1)
 
-            next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
+            next_tokens = torch.multinomial(probs.float(), num_samples=1).squeeze(1)
 
             # add code that transforms next_tokens to tokens_to_add
             if eos_token_id is not None:
@@ -2144,7 +2144,7 @@ class GenerationMixin:
 
             probs = F.softmax(next_token_scores, dim=-1)
 
-            next_tokens = torch.multinomial(probs, num_samples=2 * num_beams)
+            next_tokens = torch.multinomial(probs.float(), num_samples=2 * num_beams)
             next_token_scores = torch.gather(next_token_scores, -1, next_tokens)
 
             next_token_scores, _indices = torch.sort(next_token_scores, descending=True, dim=1)
