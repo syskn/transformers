@@ -578,7 +578,7 @@ class GPT2Model(GPT2PreTrainedModel):
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
 
         self.drop = nn.Dropout(config.embd_pdrop)
-        self.h = nn.ModuleList([GPT2Block(config) for _ in range(config.num_hidden_layers)])
+        self.h = nn.ModuleList([GPT2Block(config).half().cuda() for _ in range(config.num_hidden_layers)])
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
 
         self.init_weights()
@@ -843,8 +843,8 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
 
     def __init__(self, config):
         super().__init__(config)
-        self.transformer = GPT2Model(config)
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.transformer = GPT2Model(config).half().cuda()
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False).half().cuda()
 
         self.init_weights()
 
