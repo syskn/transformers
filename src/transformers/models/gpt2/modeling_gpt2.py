@@ -174,11 +174,14 @@ class GPT2Attention(nn.Module):
         self.num_heads = self.num_heads - len(heads)
         self.pruned_heads = self.pruned_heads.union(heads)
 
-    def _attn(self, query, key, value, attention_mask=None, head_mask=None):
+    def _attn(self, query, key, value, attention_mask=None, head_mask=None, mod_attn=None):
         attn_weights = torch.matmul(query, key.transpose(-1, -2))
 
         if self.scale_attn_weights:
             attn_weights = attn_weights / (float(value.size(-1)) ** 0.5)
+
+        if mod_attn is not None:
+            attn_weights += mod_attn[:, -attn_weights.shape[2]:, :].unsqueeze(0)
 
         if not self.is_cross_attention:
             # if only "normal" attention layer implements causal mask
@@ -227,6 +230,7 @@ class GPT2Attention(nn.Module):
         encoder_attention_mask=None,
         use_cache=False,
         output_attentions=False,
+        mod_attn=None,
     ):
         if encoder_hidden_states is not None:
             if not hasattr(self, "q_attn"):
@@ -255,7 +259,7 @@ class GPT2Attention(nn.Module):
         else:
             present = None
 
-        attn_output, attn_weights = self._attn(query, key, value, attention_mask, head_mask)
+        attn_output, attn_weights = self._attn(query, key, value, attention_mask, head_mask, mod_attn)
 
         attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
         attn_output = self.c_proj(attn_output)
@@ -311,6 +315,7 @@ class GPT2Block(nn.Module):
         encoder_attention_mask=None,
         use_cache=False,
         output_attentions=False,
+        mod_attn=None,
     ):
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
@@ -321,6 +326,7 @@ class GPT2Block(nn.Module):
             head_mask=head_mask,
             use_cache=use_cache,
             output_attentions=output_attentions,
+            mod_attn=mod_attn,
         )
         attn_output = attn_outputs[0]  # output_attn: a, present, (attentions)
         outputs = attn_outputs[1:]
@@ -343,6 +349,7 @@ class GPT2Block(nn.Module):
                 encoder_hidden_states=encoder_hidden_states,
                 encoder_attention_mask=encoder_attention_mask,
                 output_attentions=output_attentions,
+                mod_attn=mod_attn,
             )
             attn_output = cross_attn_outputs[0]
             # residual connection
@@ -655,6 +662,7 @@ class GPT2Model(GPT2PreTrainedModel):
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
+        mod_attn=None,
     ):
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -795,6 +803,7 @@ class GPT2Model(GPT2PreTrainedModel):
                     encoder_attention_mask=encoder_attention_mask,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
+                    mod_attn=mod_attn,
                 )
 
             hidden_states = outputs[0]
@@ -929,6 +938,7 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
+        mod_attn=None,
     ):
         r"""
         labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
@@ -952,6 +962,7 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            mod_attn=mod_attn,
         )
         hidden_states = transformer_outputs[0]
 
