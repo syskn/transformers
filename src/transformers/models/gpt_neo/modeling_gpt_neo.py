@@ -208,12 +208,18 @@ class GPTNeoAttentionMixin:
         new_shape = tensor.size()[:-2] + (num_heads * attn_head_size,)
         return tensor.view(new_shape)
 
-    def _attn(self, query, key, value, causal_mask, masked_bias, attn_dropout, attention_mask=None, head_mask=None):
+    def _attn(self, query, key, value, causal_mask, masked_bias, attn_dropout, attention_mask=None, head_mask=None, mod_attn=None):
         # Keep the attention weights computation in fp32 to avoid overflow issues
         query = query.to(torch.float32)
         key = key.to(torch.float32)
 
         attn_weights = torch.matmul(query, key.transpose(-1, -2))
+        if mod_attn is not None:
+            #torch.set_printoptions(linewidth=130, sci_mode=False)
+            #print(attn_weights)
+            #print(mod_attn)
+            #sys.exit(0)
+            attn_weights += mod_attn[:, -attn_weights.shape[2]:, :].unsqueeze(0).float()
         attn_weights = torch.where(causal_mask, attn_weights, masked_bias.to(attn_weights.dtype))
 
         if attention_mask is not None:
@@ -284,6 +290,7 @@ class GPTNeoSelfAttention(nn.Module, GPTNeoAttentionMixin):
         use_cache=False,
         output_attentions=False,
         rotary_emb=None,
+        mod_attn=None,
     ):
 
         query = self.q_proj(hidden_states)
@@ -325,7 +332,7 @@ class GPTNeoSelfAttention(nn.Module, GPTNeoAttentionMixin):
         causal_mask = self.bias[:, :, key_length - query_length : key_length, :key_length]
 
         attn_output, attn_weights = self._attn(
-            query, key, value, causal_mask, self.masked_bias, self.attn_dropout, attention_mask, head_mask
+            query, key, value, causal_mask, self.masked_bias, self.attn_dropout, attention_mask, head_mask, mod_attn
         )
 
         attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
@@ -363,6 +370,7 @@ class GPTNeoAttention(nn.Module):
         use_cache=False,
         output_attentions=False,
         rotary_emb=None,
+        mod_attn=None,
     ):
         outputs = self.attention(
             hidden_states,
@@ -372,6 +380,7 @@ class GPTNeoAttention(nn.Module):
             use_cache=use_cache,
             output_attentions=output_attentions,
             rotary_emb=rotary_emb,
+            mod_attn=mod_attn,
         )
 
         return outputs
@@ -413,6 +422,7 @@ class GPTNeoBlock(nn.Module):
         use_cache=False,
         output_attentions=False,
         rotary_emb=None,
+        mod_attn=None,
     ):
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
@@ -424,6 +434,7 @@ class GPTNeoBlock(nn.Module):
             use_cache=use_cache,
             output_attentions=output_attentions,
             rotary_emb=rotary_emb,
+            mod_attn=mod_attn,
         )
         attn_output = attn_outputs[0]  # output_attn: a, present, (attentions)
         outputs = attn_outputs[1:]
@@ -607,6 +618,7 @@ class GPTNeoModel(GPTNeoPreTrainedModel):
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
+        mod_attn=None,
     ):
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -737,6 +749,7 @@ class GPTNeoModel(GPTNeoPreTrainedModel):
                     use_cache=use_cache,
                     output_attentions=output_attentions,
                     rotary_emb=rotary_emb,
+                    mod_attn=mod_attn,
                 )
 
             hidden_states = outputs[0]
@@ -837,6 +850,7 @@ class GPTNeoForCausalLM(GPTNeoPreTrainedModel):
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
+        mod_attn=None,
     ):
         r"""
         labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
@@ -858,6 +872,7 @@ class GPTNeoForCausalLM(GPTNeoPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            mod_attn=mod_attn,
         )
         hidden_states = transformer_outputs[0]
 
