@@ -1267,6 +1267,7 @@ class GenerationMixin:
         cur_len = input_ids.shape[-1]
 
         this_peer_finished = False  # used by synced_gpus only
+        mod_attn = None
         while True:
 
             if synced_gpus:
@@ -1286,8 +1287,9 @@ class GenerationMixin:
             outputs = self(
                 **model_inputs,
                 return_dict=True,
-                output_attentions=output_attentions,
+                output_attentions=True,
                 output_hidden_states=output_hidden_states,
+                mod_attn=mod_attn,
             )
 
             if synced_gpus and this_peer_finished:
@@ -1342,6 +1344,51 @@ class GenerationMixin:
                     break
                 else:
                     this_peer_finished = True
+
+            ids = input_ids
+            attn = outputs.attentions
+            lh = len(attn) * attn[0].shape[1]
+            attn = torch.stack(attn, dim=1).float().mean(1).mean(1) / lh
+            #torch.set_printoptions(linewidth=130, sci_mode=False)
+            #print(attn)
+            sentence_ids = torch.zeros(ids.shape).long().to(ids.device)
+            id_ids = torch.arange(ids.shape[1]).long().to(ids.device)
+            sentence_ends = [0, 13, 30, 526, 552, 764, 986, 1106, 1701, 2109, 2474, 2644, 4181, 5145, 5633, 8864, 9313]
+            for end in sentence_ends:
+               sentence_ids[ids == end] = 1
+            end_of_sentence = sentence_ids[-1] == 1
+            sentence_ids[:,1:] = sentence_ids.cumsum(dim=-1)[:,:-1]
+
+            f_i_j = torch.zeros(ids.shape[0], ids.shape[1], ids.shape[1]).float().to(ids.device)
+
+            # calculate sentence attention using aggregate token attention
+            #if not 'tokenizer' in locals():
+            #    from transformers import AutoTokenizer
+            #    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+            for seq in range(sentence_ids.shape[0]):
+                for i in range(sentence_ids[seq, -1].cpu().item(),-1,-1):
+                    #i = sentence_ids[seq, -1].item()
+                    g_mask = sentence_ids[seq] == i
+                    g_idx = id_ids[g_mask]
+                    #print("sentence", tokenizer.decode(ids.cpu()[0,g_idx]))
+                    g_num = g_mask.sum().float()
+                    for j in range(i - 1, -1, -1):
+                        p_mask = sentence_ids[seq] == j
+                        p_num = p_mask.sum().float()
+                        mask = torch.zeros(f_i_j.shape[1:]).bool().to(ids.device)
+                        mask[g_idx] = p_mask
+                        last_mask = mask[1:, 1:]
+                        #print("--------------------------------------")
+                        #print(torch.masked_select(attn[seq], last_mask).float().sum())
+                        #print(torch.masked_select(attn[seq], last_mask).float())
+                        #print("attn", attn[seq])
+                        #print("last_mask", last_mask)
+                        a_gi_pj = torch.masked_select(attn[seq], last_mask).float().sum() / (g_num * p_num)
+                        if a_gi_pj > 0.000001:
+                            f_i_j[seq, mask] = 1/a_gi_pj.float()
+                        #print("f_i_j", f_i_j[seq, mask])
+            mod_attn = f_i_j
+            #print(sentence_ids[seq, -1].cpu().item(), mod_attn)
 
         if return_dict_in_generate:
             if self.config.is_encoder_decoder:
@@ -1603,11 +1650,15 @@ class GenerationMixin:
             f_i_j = torch.zeros(ids.shape[0], ids.shape[1], ids.shape[1]).float().to(ids.device)
 
             # calculate sentence attention using aggregate token attention
+            #if not 'tokenizer' in locals():
+            #    from transformers import AutoTokenizer
+            #    tokenizer = AutoTokenizer.from_pretrained("gpt2")
             for seq in range(sentence_ids.shape[0]):
                 for i in range(sentence_ids[seq, -1].cpu().item(),-1,-1):
                     #i = sentence_ids[seq, -1].item()
                     g_mask = sentence_ids[seq] == i
                     g_idx = id_ids[g_mask]
+                    #print("sentence", tokenizer.decode(ids.cpu()[0,g_idx]))
                     g_num = g_mask.sum().float()
                     for j in range(i - 1, -1, -1):
                         p_mask = sentence_ids[seq] == j
