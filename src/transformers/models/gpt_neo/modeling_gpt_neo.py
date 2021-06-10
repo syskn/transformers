@@ -39,6 +39,16 @@ from .configuration_gpt_neo import GPTNeoConfig
 from einops import rearrange, repeat
 
 
+trace_id = 0
+def trace(name, data):
+    global trace_id
+    if not os.path.isdir("trace"):
+        return
+    filename = f"trace/{trace_id:05d}_{name}.pt"
+    torch.save(data, filename)
+    trace_id += 1
+
+
 logger = logging.get_logger(__name__)
 
 _CONFIG_FOR_DOC = "GPTNeoConfig"
@@ -312,13 +322,16 @@ class GPTNeoSelfAttention(nn.Module, GPTNeoAttentionMixin):
         rotary_emb=None,
     ):
 
+        trace(f"attn_pre", {"hidden_states": hidden_states})
         query = self.q_proj(hidden_states)
         key = self.k_proj(hidden_states)
         value = self.v_proj(hidden_states)
+        trace(f"attn_post_qkv_proj", {"q": query, "k": key, "v": value})
 
         query = self._split_heads(query, self.num_heads, self.head_dim, self.rotary).float()
         key = self._split_heads(key, self.num_heads, self.head_dim, self.rotary).float()
         value = self._split_heads(value, self.num_heads, self.head_dim, False)
+        trace(f"attn_post_split_heads", {"q": query, "k": key, "v": value})
 
         if self.rotary:
           if self.rotary_dim is not None:
@@ -329,16 +342,20 @@ class GPTNeoSelfAttention(nn.Module, GPTNeoAttentionMixin):
               q_pass = query[:, :, :, self.rotary_dim:]
 
               sincos = fixed_pos_embedding(k_rot, 1)
+              trace(f"attn_sincos", {"sincos": sincos, "k_rot": k_rot, "q_rot": q_rot})
               k_rot = apply_rotary_pos_emb(k_rot, sincos)
               q_rot = apply_rotary_pos_emb(q_rot, sincos)
+              trace(f"attn_applied_rotary", {"k_rot": k_rot, "q_rot": q_rot})
 
               key = torch.cat([k_rot, k_pass], dim=-1)
               query = torch.cat([q_rot, q_pass], dim=-1)
           elif rotary_emb is not None:
               key = apply_rotary_pos_emb(key, rotary_emb)
               query = apply_rotary_pos_emb(query, rotary_emb)
+          trace(f"attn_rotary_cat", {"k": key, "q": query})
           key = key.permute(0, 2, 1, 3)
           query = query.permute(0, 2, 1, 3)
+          trace(f"attn_post_rotary_permute", {"k": key, "q": query})
 
         if layer_past is not None:
             past_key = layer_past[0]
@@ -354,18 +371,23 @@ class GPTNeoSelfAttention(nn.Module, GPTNeoAttentionMixin):
         query_length, key_length = query.size(-2), key.size(-2)
         causal_mask = self.bias[:, :, key_length - query_length : key_length, :key_length]
 
+        trace(f"attn_pre_attn", {"q": query, "k": key, "v": value, "causal_mask": causal_mask, "masked_bias": self.masked_bias, "attn_dropout": self.attn_dropout, "attention_mask": attention_mask, "head_mask": head_mask, "scale_attn": self.scale_attn})
         attn_output, attn_weights = self._attn(
             query, key, value, causal_mask, self.masked_bias, self.attn_dropout, attention_mask, head_mask, self.scale_attn
         )
+        trace(f"attn_post_attn", {"attn_output": attn_output, "attn_weights": attn_weights})
 
         attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
+        trace(f"attn_post_merge_heads", {"attn_output": attn_output})
         attn_output = self.out_proj(attn_output)
+        trace(f"attn_post_out_proj", {"attn_output": attn_output})
         attn_output = self.resid_dropout(attn_output)
 
         outputs = (attn_output, present)
         if output_attentions:
             outputs += (attn_weights,)
 
+        trace(f"attn_post", {"outputs": outputs})
         return outputs  # a, present, (attentions)
 
 
@@ -417,10 +439,15 @@ class GPTNeoMLP(nn.Module):
         self.dropout = nn.Dropout(config.resid_dropout)
 
     def forward(self, hidden_states):
+        trace(f"mlp_pre_c_fc", {"hidden_states": hidden_states})
         hidden_states = self.c_fc(hidden_states)
+        trace(f"mlp_pre_act", {"hidden_states": hidden_states})
         hidden_states = self.act(hidden_states)
+        trace(f"mlp_pre_c_proj", {"hidden_states": hidden_states})
         hidden_states = self.c_proj(hidden_states)
+        trace(f"mlp_pre_dropout", {"hidden_states": hidden_states})
         hidden_states = self.dropout(hidden_states)
+        trace(f"mlp_done", {"hidden_states": hidden_states})
         return hidden_states
 
 
@@ -447,7 +474,9 @@ class GPTNeoBlock(nn.Module):
         rotary_emb=None,
     ):
         residual = hidden_states
+        trace(f"block_pre_ln_1", {"hidden_states": hidden_states})
         hidden_states = self.ln_1(hidden_states)
+        trace(f"block_post_ln_1", {"hidden_states": hidden_states})
         attn_outputs = self.attn(
             hidden_states,
             layer_past=layer_past,
@@ -458,11 +487,14 @@ class GPTNeoBlock(nn.Module):
             rotary_emb=rotary_emb,
         )
         attn_output = attn_outputs[0]  # output_attn: a, present, (attentions)
+        trace(f"block_attn_output", {"attn_output": attn_output})
         outputs = attn_outputs[1:]
         
         if self.jax:
             feed_forward_hidden_states = self.mlp(hidden_states)
+            trace(f"block_mlp_output", {"feed_forward_hidden_states": feed_forward_hidden_states})
             hidden_states = attn_output + feed_forward_hidden_states
+            trace(f"block_attn+dense", {"hidden_states": hidden_states})
         else:
             # residual connection
             hidden_states = attn_output + residual
@@ -478,6 +510,7 @@ class GPTNeoBlock(nn.Module):
         else:
             outputs = (hidden_states,) + outputs[1:]
 
+        trace(f"block_outputs", {"outputs": outputs})
         return outputs  # hidden_states, present, (attentions, cross_attentions)
 
 
@@ -716,8 +749,10 @@ class GPTNeoModel(GPTNeoPreTrainedModel):
         # head_mask has shape n_layer x batch x num_heads x N x N
         head_mask = self.get_head_mask(head_mask, self.config.num_layers)
 
+        trace("input_ids", input_ids)
         if inputs_embeds is None:
             inputs_embeds = self.wte(input_ids)
+        trace("input_embeds", input_embeds)
 
         if self.rotary is not None:
             hidden_states = inputs_embeds
@@ -726,6 +761,7 @@ class GPTNeoModel(GPTNeoPreTrainedModel):
             position_embeds = self.wpe(position_ids)
             hidden_states = inputs_embeds + position_embeds
             rotary_emb = None
+        trace("pe_hidden_states", hidden_states)
 
         if token_type_ids is not None:
             token_type_embeds = self.wte(token_type_ids)
@@ -769,6 +805,7 @@ class GPTNeoModel(GPTNeoPreTrainedModel):
                     head_mask[i],
                 )
             else:
+                trace(f"pre_block[{i}]", {"hidden_states": hidden_states, "layer_past": layer_past, "attn_mask": attn_mask, "head_mask[i]": head_mask[i]})
                 outputs = block(
                     hidden_states,
                     layer_past=layer_past,
@@ -780,13 +817,16 @@ class GPTNeoModel(GPTNeoPreTrainedModel):
                 )
 
             hidden_states = outputs[0]
+            trace(f"post_block[{i}]", {"hidden_states": hidden_states})
             if use_cache is True:
                 presents = presents + (outputs[1],)
 
             if output_attentions:
                 all_self_attentions = all_self_attentions + (outputs[2 if use_cache else 1],)
 
+        trace(f"pre_ln_f", {"hidden_states": hidden_states})
         hidden_states = self.ln_f(hidden_states)
+        trace(f"post_ln_f", {"hidden_states": hidden_states})
 
         hidden_states = hidden_states.view(*output_shape)
         # Add last hidden state
@@ -905,7 +945,9 @@ class GPTNeoForCausalLM(GPTNeoPreTrainedModel):
         )
         hidden_states = transformer_outputs[0]
 
+        trace(f"pre_lm_head", {"hidden_states": hidden_states})
         lm_logits = self.lm_head(hidden_states)
+        trace(f"post_lm_head", {"hidden_states": hidden_states})
 
         loss = None
         if labels is not None:
