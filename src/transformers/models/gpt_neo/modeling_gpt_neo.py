@@ -752,7 +752,7 @@ class GPTNeoModel(GPTNeoPreTrainedModel):
         trace("input_ids", input_ids)
         if inputs_embeds is None:
             inputs_embeds = self.wte(input_ids)
-        trace("input_embeds", input_embeds)
+        trace("inputs_embeds", inputs_embeds)
 
         if self.rotary is not None:
             hidden_states = inputs_embeds
