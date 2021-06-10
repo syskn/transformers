@@ -493,7 +493,7 @@ class GPTNeoBlock(nn.Module):
         if self.jax:
             feed_forward_hidden_states = self.mlp(hidden_states)
             trace(f"block_mlp_output", {"feed_forward_hidden_states": feed_forward_hidden_states})
-            hidden_states = attn_output + feed_forward_hidden_states
+            hidden_states = attn_output + feed_forward_hidden_states + residual
             trace(f"block_attn+dense", {"hidden_states": hidden_states})
         else:
             # residual connection
