@@ -204,36 +204,52 @@ class GPTNeoAttentionMixin:
         new_shape = tensor.size()[:-2] + (num_heads * attn_head_size,)
         return tensor.view(new_shape)
 
-    def _attn(self, query, key, value, causal_mask, masked_bias, attn_dropout, attention_mask=None, head_mask=None, scale_attn=None):
-        # Keep the attention weights computation in fp32 to avoid overflow issues
-        query = query.to(torch.float32)
-        key = key.to(torch.float32)
+    def _attn(self, q, k, v, causal_mask, masked_bias, attn_dropout, attention_mask=None, head_mask=None, scale_attn=None):
+        k = k.transpose(-1, -2)
 
-        attn_weights = torch.matmul(query, key.transpose(-1, -2))
-        attn_weights = torch.where(causal_mask, attn_weights, masked_bias.to(attn_weights.dtype))
-        
+        w1 = torch.einsum(
+            "bmhtd,bnhsd->bmhts",
+            q.view((q.size(0) // self.num_beams, self.num_beams) + q.shape[1:]),
+            self.cache_input_key)
+        w1 = w1.reshape((-1,) + w1.shape[2:])
+        w2 = torch.matmul(q, k)
+        w = torch.cat([w1, w2], dim=-1)
         if scale_attn is not None:
-            attn_weights = attn_weights / scale_attn
+            w = w / scale_attn
+        nd, ns = w.size(-2), w.size(-1)
+        #w = torch.where(causal_mask, w, masked_bias.to(w.dtype))
+        mask = self.bias[:, :, ns - nd : ns, :ns]
+        w = torch.where(mask.bool(), w, self.masked_bias.to(w.dtype))
 
         if attention_mask is not None:
             # Apply the attention mask
-            attn_weights = attn_weights + attention_mask
+            w = w + attention_mask
 
-        attn_weights = nn.Softmax(dim=-1)(attn_weights)
-        attn_weights = attn_weights.to(value.dtype)
-        attn_weights = attn_dropout(attn_weights)
+        w = nn.Softmax(dim=-1)(w)
+        w = attn_dropout(w)
 
         # Mask heads if we want to
         if head_mask is not None:
-            attn_weights = attn_weights * head_mask
+            w = w * head_mask
 
-        attn_output = torch.matmul(attn_weights, value)
+        split_weights = w.split(self.cache_input_len, dim=-1)
+        w1 = split_weights[0]
+        w1 = w1.view(
+            (w1.size(0)//self.num_beams, self.num_beams) + w1.shape[1:])
+        attn = torch.einsum(
+            "bmhtd,bnhds->bmhts",
+            w1,
+            self.cache_input_value)
+        attn = attn.reshape((-1,) + attn.shape[2:])
+        if len(split_weights) == 2:
+            attn += torch.matmul(split_weights[1], v)
+        outputs = attn
 
-        return attn_output, attn_weights
+        return outputs, w
 
 
 class GPTNeoSelfAttention(nn.Module, GPTNeoAttentionMixin):
-    def __init__(self, attention_type, config):
+    def __init__(self, attention_type, config, num_beams=1):
         super().__init__()
 
         self.window_size = None
@@ -283,6 +299,11 @@ class GPTNeoSelfAttention(nn.Module, GPTNeoAttentionMixin):
             self.register_buffer("sin", sin)
             self.register_buffer("cos", cos)
 
+        self.cache_input_key = None
+        self.cache_input_value = None
+        self.cache_input_len = -1
+        self.num_beams = num_beams
+
     def forward(
         self,
         hidden_states,
@@ -326,15 +347,37 @@ class GPTNeoSelfAttention(nn.Module, GPTNeoAttentionMixin):
             query = query.permute(0, 2, 1, 3)
 
         if layer_past is not None:
-            past_key = layer_past[0]
+            past_key = layer_past[0] # transpose back cf below
             past_value = layer_past[1]
-            key = torch.cat((past_key, key), dim=-2).half()
-            value = torch.cat((past_value, value), dim=-2).half()
+            key = torch.cat((past_key, key), dim=-2)
+            value = torch.cat((past_value, value), dim=-2)
 
         if use_cache is True:
-            present = (key, value)
+            if layer_past is None:
+                if self.cache_input_key is not None:
+                    logger.debug(
+                        "The previous cached key and value in GPT2 "
+                        "self-attention layer have been updated. If this is not"
+                        " on purpose, please add past/layer_past parameter when"
+                        " call this model or self-attention layer.")
+                self.cache_input_key = key
+                self.cache_input_value = value
+
+                # remove the duplicated dimensions
+                cache_shape = self.cache_input_key.shape
+                cache_shape = (
+                    cache_shape[0]//self.num_beams, self.num_beams,
+                    ) + cache_shape[1:]
+                self.cache_input_key = self.cache_input_key.reshape(cache_shape)[:,:1,].contiguous()
+                self.cache_input_value = self.cache_input_value.reshape(cache_shape)[:,:1,].contiguous()
+                self.cache_input_len = self.cache_input_key.size(-2)
+
+                key = key[:, :, self.cache_input_len:, :]
+                value = value[:, :, self.cache_input_len:, :]
+            # transpose to have same shapes for stacking
+            present = torch.stack((key, value))
         else:
-            present = None
+            present = (None,)
 
         query_length, key_length = query.size(-2), key.size(-2)
         causal_mask = self.bias[:, :, key_length - query_length : key_length, :key_length]
@@ -654,7 +697,11 @@ class GPTNeoModel(GPTNeoPreTrainedModel):
             past_length = 0
             past_key_values = tuple([None] * len(self.h))
         else:
-            past_length = past_key_values[0][0].size(-2)
+            # the beginning part of key and value is for the input sentence
+            # where each beam is the same and will not be changed, so this part
+            # of key and value is cached to avoid the recomputing. Here, the
+            # shape of cached past needs to add the lenght of source input.
+            past_length = past_key_values[0][0].size(-2) + self.h[0].attn.attention.cache_input_len
 
         device = input_ids.device if input_ids is not None else inputs_embeds.device
         if position_ids is None:
