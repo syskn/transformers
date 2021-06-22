@@ -204,20 +204,23 @@ class GPTNeoAttentionMixin:
         new_shape = tensor.size()[:-2] + (num_heads * attn_head_size,)
         return tensor.view(new_shape)
 
-    def _attn(self, query, key, value, causal_mask, masked_bias, attn_dropout, attention_mask=None, head_mask=None, scale_attn=None):
-        # Keep the attention weights computation in fp32 to avoid overflow issues
-        query = query.to(torch.float32)
-        key = key.to(torch.float32)
-
-        attn_weights = torch.matmul(query, key.transpose(-1, -2))
-        attn_weights = torch.where(causal_mask, attn_weights, masked_bias.to(attn_weights.dtype))
+    def _attn(self, query, key, value, causal_mask, masked_bias, attn_dropout, attention_mask=None, head_mask=None, scale_attn=None, el_attn=False):
+        if el_attn:
+            attn_weights = torch.bmm(query, key)
+            attn_weights = torch.where(causal_mask.squeeze(0), attn_weights, masked_bias.to(attn_weights.dtype))
+        else:
+            attn_weights = torch.matmul(query, key.transpose(-1, -2))
+            attn_weights = torch.where(causal_mask, attn_weights, masked_bias.to(attn_weights.dtype))
         
         if scale_attn is not None:
             attn_weights = attn_weights / scale_attn
 
         if attention_mask is not None:
             # Apply the attention mask
-            attn_weights = attn_weights + attention_mask
+            if el_attn:
+                attn_weights = attn_weights + attention_mask.squeeze(0)
+            else:
+                attn_weights = attn_weights + attention_mask
 
         attn_weights = nn.Softmax(dim=-1)(attn_weights)
         attn_weights = attn_weights.to(value.dtype)
@@ -227,7 +230,10 @@ class GPTNeoAttentionMixin:
         if head_mask is not None:
             attn_weights = attn_weights * head_mask
 
-        attn_output = torch.matmul(attn_weights, value)
+        if el_attn:
+            attn_output = torch.bmm(attn_weights, value)
+        else:
+            attn_output = torch.matmul(attn_weights, value)
 
         return attn_output, attn_weights
 
@@ -274,6 +280,7 @@ class GPTNeoSelfAttention(nn.Module, GPTNeoAttentionMixin):
         self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
         self.q_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
         self.out_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=not config.jax)
+        self.jax = config.jax
         self.rotary = config.rotary
         self.rotary_dim = self.head_dim
         if config.rotary_dim is not None:
@@ -282,6 +289,22 @@ class GPTNeoSelfAttention(nn.Module, GPTNeoAttentionMixin):
             sin, cos = fixed_pos_embedding(dim=self.rotary_dim, seq_len=max_positions)
             self.register_buffer("sin", sin)
             self.register_buffer("cos", cos)
+        self.w_ffn_q = None
+        self.w_ffn_o = None
+        self.el_attn = True
+
+    def ffn_q(self, q):
+        if self.w_ffn_q is None:
+            self.w_ffn_q = torch.matmul(self.q_proj.weight, self.k_proj.weight)
+        return torch.matmul(q, self.w_ffn_q)
+
+    def ffn_o(self, v):
+        if self.w_ffn_o is None:
+            self.w_ffn_o = torch.matmul(self.v_proj.weight, self.out_proj.weight)
+        if self.jax:
+            return torch.matmul(v, self.w_ffn_o) + self.out_proj.bias
+        else:
+            return torch.matmul(v, self.w_ffn_o)
 
     def forward(
         self,
@@ -293,9 +316,14 @@ class GPTNeoSelfAttention(nn.Module, GPTNeoAttentionMixin):
         output_attentions=False,
     ):
 
-        query = self.q_proj(hidden_states)
-        key = self.k_proj(hidden_states)
-        value = self.v_proj(hidden_states)
+        if self.el_attn:
+            query = self.ffn_q(hidden_states)
+            key = hidden_states
+            value = hidden_states
+        else:
+            query = self.q_proj(hidden_states)
+            key = self.k_proj(hidden_states)
+            value = self.v_proj(hidden_states)
 
         query = self._split_heads(query, self.num_heads, self.head_dim, self.rotary)
         key = self._split_heads(key, self.num_heads, self.head_dim, self.rotary)
@@ -314,37 +342,56 @@ class GPTNeoSelfAttention(nn.Module, GPTNeoAttentionMixin):
                 q_rot = query[:, :, :, :self.rotary_dim]
                 q_pass = query[:, :, :, self.rotary_dim:]
 
-                k_rot = apply_rotary_pos_emb(k_rot, (self.sin, self.cos), offset=offset).half()
-                q_rot = apply_rotary_pos_emb(q_rot, (self.sin, self.cos), offset=offset).half()
+                k_rot = apply_rotary_pos_emb(k_rot, (self.sin, self.cos), offset=offset).to(k_rot.dtype)
+                q_rot = apply_rotary_pos_emb(q_rot, (self.sin, self.cos), offset=offset).to(q_rot.dtype)
 
                 key = torch.cat([k_rot, k_pass], dim=-1)
                 query = torch.cat([q_rot, q_pass], dim=-1)
             elif self.rotary:
-                key = apply_rotary_pos_emb(key, (self.sin, self.cos), offset=offset)
-                query = apply_rotary_pos_emb(query, (self.sin, self.cos), offset=offset)
+                key = apply_rotary_pos_emb(key, (self.sin, self.cos), offset=offset).to(k_rot.dtype)
+                query = apply_rotary_pos_emb(query, (self.sin, self.cos), offset=offset).to(q_rot.dtype)
             key = key.permute(0, 2, 1, 3)
             query = query.permute(0, 2, 1, 3)
 
         if layer_past is not None:
             past_key = layer_past[0]
             past_value = layer_past[1]
-            key = torch.cat((past_key, key), dim=-2).half()
-            value = torch.cat((past_value, value), dim=-2).half()
+            if self.el_attn:
+                key = torch.cat((past_key, key), dim=-2)
+                value = key
+            else:
+                key = torch.cat((past_key, key), dim=-2)
+                value = torch.cat((past_value, value), dim=-2)
 
         if use_cache is True:
-            present = (key, value)
+            if self.el_attn:
+                present = (key, None)
+            else:
+                present = (key, value)
         else:
             present = None
 
         query_length, key_length = query.size(-2), key.size(-2)
         causal_mask = self.bias[:, :, key_length - query_length : key_length, :key_length]
 
+        if self.el_attn:
+            bsz, h, tgt_len, dim = key.shape #(batch, head, seq_length, head_features)
+            key = key.transpose(2, 3).reshape(bsz, h*dim, tgt_len)
+            bsz, h, tgt_len, dim = value.shape #(batch, head, seq_length, head_features)
+            value = value.transpose(1, 2).reshape(bsz, tgt_len, h*dim)
+            bsz, h, tgt_len, dim = query.shape #(batch, head, seq_length, head_features)
+            query = query.transpose(1, 2).reshape(bsz, tgt_len, h*dim)
+
         attn_output, attn_weights = self._attn(
-            query, key, value, causal_mask, self.masked_bias, self.attn_dropout, attention_mask, head_mask, self.scale_attn
+            query, key, value, causal_mask, self.masked_bias, self.attn_dropout, attention_mask, head_mask, self.scale_attn, self.el_attn
         )
 
-        attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
-        attn_output = self.out_proj(attn_output)
+        if self.el_attn:
+            attn_output = self.ffn_o(attn_output)
+            attn_output = attn_output.reshape(bsz, tgt_len, h * dim)
+        else:
+            attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
+            attn_output = self.out_proj(attn_output)
         attn_output = self.resid_dropout(attn_output)
 
         outputs = (attn_output, present)
