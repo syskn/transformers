@@ -180,7 +180,7 @@ class RepetitionPenaltyLogitsProcessor(LogitsProcessor):
         if not isinstance(penalty, float) or not (penalty > 0):
             raise ValueError(f"`penalty` has to be a strictly positive float, but is {penalty}")
 
-        self.penalty = penalty
+        self.penalty = 1.0 if penalty < 1.0 else penalty
         self.raw_penalty = penalty
         self.penalize_last = None
         if not m is None and not penalize_last is None:
@@ -192,12 +192,17 @@ class RepetitionPenaltyLogitsProcessor(LogitsProcessor):
         self.alpha_presence = alpha_presence if alpha_presence is not None and alpha_presence > 0.0 else None
         self.alpha_enable = self.alpha_frequency is not None or self.alpha_presence is not None
         self.whitelist = None
+        self.whitelist_list = None
         if whitelist is not None:
-            self.whitelist = torch.tensor(whitelist).long().sort()[0]
+            self.whitelist_list = whitelist
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        if self.whitelist is None and self.whitelist_list is not None:
+            self.whitelist_list = list(filter(lambda x: x >= 0 and x < scores.shape[1], self.whitelist_list))
+            if len(self.whitelist_list) > 0:
+                self.whitelist = torch.tensor(self.whitelist_list).long().sort()[0]
+                self.whitelist = self.whitelist.to(input_ids.device)
         if self.whitelist is not None:
-            self.whitelist = self.whitelist.to(input_ids.device)
             unpenalized = scores.gather(1, self.whitelist.view(1, -1))
 
         if self.raw_penalty > 1.0:
