@@ -183,7 +183,7 @@ class RepetitionPenaltyLogitsProcessor(LogitsProcessor):
         self.penalty = 1.0 if penalty < 1.0 else penalty
         self.raw_penalty = penalty
         self.penalize_last = None
-        if not m is None and not penalize_last is None:
+        if not m is None and not penalize_last is None and penalize_last >= 1:
             self.penalty = (torch.arange(penalize_last)/(penalize_last - 1)) * 2. - 1
             self.penalty = (m * self.penalty) / (1 + torch.abs(self.penalty) * (m - 1))
             self.penalty = 1 + ((self.penalty + 1) / 2).unsqueeze(0) * (penalty - 1)
