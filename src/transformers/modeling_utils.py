@@ -27,6 +27,8 @@ from torch import Tensor, device, dtype, nn
 from torch.nn import CrossEntropyLoss
 from torch.nn import functional as F
 
+import numpy as np
+
 from .activations import get_activation
 from .configuration_utils import PretrainedConfig
 from .file_utils import (
@@ -431,19 +433,26 @@ class SplitCheckpoint(MutableMapping):
             self.modelname = name_or_path
             self.chkpt_dir = subfolder
             self.remote = True
-        self.checkpoint = self._load(SPLIT_WEIGHTS_NAME)
-    def _load(self, name, **kwparams):
+        self.checkpoint = self._load(SPLIT_WEIGHTS_NAME, None)
+    def _load(self, name, shape, **kwparams):
         if self.remote:
             path = hf_bucket_url(self.modelname, name, subfolder=self.chkpt_dir)
             path = cached_path(path)
         else:
             path = str(self.chkpt_dir / name)
-        return torch.load(path, **kwparams)
+        if shape is not None:
+            mmap = np.memmap(path, mode="r", dtype=np.float16, shape=shape)
+            return torch.as_tensor(mmap, dtype=torch.float16, device="cuda")
+        else:
+            return torch.load(path, **kwparams)
     def __len__(self):
         return len(self.checkpoint)
     def __getitem__(self, key):
-        name = self.checkpoint[key].split('/')[-1]
-        return self._load(name, map_location=self.device)
+        name = self.checkpoint[key]
+        if type(name) is tuple:
+            return self._load(name[0].split('/')[-1], name[1], map_location=self.device)
+        else:
+            return self._load(name.split('/')[-1], None, map_location=self.device)
     def __setitem__(self, key, value):
         return
     def __delitem__(self, key, value):
