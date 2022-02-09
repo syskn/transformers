@@ -564,6 +564,9 @@ class GenerationMixin:
         else:
             warpers.append(None)
 
+        if typical_p is not None and typical_p < 1.0:
+            warpers.append(TypicalLogitsWarper(mass=typical_p, min_tokens_to_keep=(2 if num_beams > 1 else 1)))
+
         if order is not None and len(order) == 4 and all([x in order for x in (0,1,2,3)]):
             reordered = []
             for i in order:
