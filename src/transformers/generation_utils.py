@@ -41,6 +41,7 @@ from .generation_logits_process import (
     TopKLogitsWarper,
     TopPLogitsWarper,
     TailFreeSamplingLogitsWarper,
+    TypicalLogitsWarper,
 )
 from .generation_stopping_criteria import (
     MaxLengthCriteria,
@@ -527,7 +528,7 @@ class GenerationMixin:
         )
 
     def _get_logits_warper(
-        self, top_k: int = None, top_p: float = None, tfs: float = None, temperature: float = None, num_beams: int = None, order: Tuple[int, int, int, int] = None
+        self, top_k: int = None, top_p: float = None, tfs: float = None, typical_p: float = None, temperature: float = None, num_beams: int = None, order: Tuple[int, int, int, int] = None
     ) -> LogitsProcessorList:
         """
         This class returns a :obj:`~transformers.LogitsProcessorList` list object that contains all relevant
@@ -538,6 +539,7 @@ class GenerationMixin:
         top_k = top_k if top_k is not None else self.config.top_k
         top_p = top_p if top_p is not None else self.config.top_p
         tfs = tfs
+        typical_p = typical_p
         temperature = temperature if temperature is not None else self.config.temperature
         # instantiate warpers list
         warpers = []
@@ -695,6 +697,7 @@ class GenerationMixin:
         temperature: Optional[float] = None,
         top_k: Optional[int] = None,
         top_p: Optional[float] = None,
+        typical_p: Optional[float] = None,
         tfs: Optional[float] = None,
         repetition_penalty: Optional[float] = None,
         repetition_penalty_range: Optional[int] = None,
@@ -1049,7 +1052,7 @@ class GenerationMixin:
         elif is_sample_gen_mode:
             # get probability distribution warper
             logits_warper = self._get_logits_warper(
-                top_k=top_k, top_p=top_p, tfs=tfs, temperature=temperature, num_beams=num_beams, order=order
+                top_k=top_k, top_p=top_p, tfs=tfs, typical_p=typical_p, temperature=temperature, num_beams=num_beams, order=order
             )
 
             # expand input_ids with `num_return_sequences` additional sequences per batch
@@ -1117,7 +1120,7 @@ class GenerationMixin:
 
         elif is_beam_sample_gen_mode:
             logits_warper = self._get_logits_warper(
-                top_k=top_k, top_p=top_p, tfs=tfs, temperature=temperature, num_beams=num_beams, order=order
+                top_k=top_k, top_p=top_p, tfs=tfs, typical_p=typical_p, temperature=temperature, num_beams=num_beams, order=order
             )
 
             batch_size = input_ids.shape[0] * num_return_sequences
