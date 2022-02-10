@@ -437,6 +437,7 @@ if is_torch_available():
         "TopKLogitsWarper",
         "TopPLogitsWarper",
         "TailFreeSamplingLogitsWarper",
+        "TypicalLogitsWarper",
     ]
     _import_structure["generation_stopping_criteria"] = [
         "MaxLengthCriteria",
